@@ -56,6 +56,79 @@ fn format_time(secs: u64) -> String {
 
 // ── Rendering ─────────────────────────────────────────────────────────────
 
+fn pick_color(finished: bool, flash_on: bool, paused: bool, remaining_ms: u64) -> &'static str {
+    let remaining_secs = (remaining_ms + 999) / 1000;
+    if finished {
+        if flash_on { "\x1b[97m" } else { "\x1b[91m" }
+    } else if paused {
+        "\x1b[36m"
+    } else if remaining_secs <= 10 {
+        "\x1b[91m"
+    } else if remaining_secs <= 60 {
+        "\x1b[93m"
+    } else {
+        "\x1b[92m"
+    }
+}
+
+fn status_text(finished: bool, paused: bool) -> &'static str {
+    if finished {
+        "TIME'S UP!  [R] reset  [Q] quit  [0-9] new"
+    } else if paused {
+        "PAUSED  [SPC] resume  [R] reset  [Q] quit"
+    } else {
+        "[SPC] pause  [R] reset  [Q] quit  [0-9] new"
+    }
+}
+
+fn render_plain(
+    text: &str,
+    cols: usize,
+    rows: usize,
+    paused: bool,
+    finished: bool,
+    remaining_ms: u64,
+    input_buf: &str,
+    flash_on: bool,
+) {
+    let color = pick_color(finished, flash_on, paused, remaining_ms);
+    let mut buf = String::with_capacity(cols * rows);
+    buf.push_str("\x1b[H");
+
+    let mid = rows / 2;
+    for tr in 0..rows {
+        buf.push_str("\x1b[0m");
+        if tr == mid {
+            let pad_l = cols.saturating_sub(text.len()) / 2;
+            for _ in 0..pad_l { buf.push(' '); }
+            buf.push_str(color);
+            buf.push_str(text);
+            buf.push_str("\x1b[0m");
+            let used = pad_l + text.len();
+            for _ in used..cols { buf.push(' '); }
+        } else if tr == rows.saturating_sub(2) && !input_buf.is_empty() {
+            let msg = format!("  New time: {input_buf}_");
+            buf.push_str("\x1b[93m");
+            buf.push_str(&msg);
+            buf.push_str("\x1b[0m");
+            for _ in msg.len()..cols { buf.push(' '); }
+        } else if tr == rows.saturating_sub(1) {
+            buf.push_str("\x1b[2m");
+            let status = status_text(finished, paused);
+            let pad_l = cols.saturating_sub(status.len()) / 2;
+            for _ in 0..pad_l { buf.push(' '); }
+            buf.push_str(status);
+            let used = pad_l + status.len();
+            for _ in used..cols { buf.push(' '); }
+            buf.push_str("\x1b[0m");
+        } else {
+            for _ in 0..cols { buf.push(' '); }
+        }
+        if tr + 1 < rows { buf.push_str("\r\n"); }
+    }
+    term::write_bytes(buf.as_bytes());
+}
+
 fn render(
     text: &str,
     cols: usize,
@@ -75,9 +148,15 @@ fn render(
     // half-blocks: each font pixel = scale columns wide, 2 pixel-rows per terminal row
     let avail_cols = cols.saturating_sub(4);
     let avail_rows = rows.saturating_sub(4);
-    let scale_x = if text_px_w > 0 { avail_cols / text_px_w } else { 1 };
-    let scale_y = if fh > 0 { avail_rows * 2 / fh } else { 1 };
-    let scale = scale_x.min(scale_y).max(1);
+    let scale_x = if text_px_w > 0 { avail_cols / text_px_w } else { 0 };
+    let scale_y = if fh > 0 { avail_rows * 2 / fh } else { 0 };
+    let scale = scale_x.min(scale_y);
+
+    // Too small for bitmap → plain centered text
+    if scale == 0 {
+        render_plain(text, cols, rows, paused, finished, remaining_ms, input_buf, flash_on);
+        return;
+    }
 
     let disp_cols = text_px_w * scale;
     let disp_rows = fh * scale / 2;
@@ -85,18 +164,7 @@ fn render(
     let margin_left = cols.saturating_sub(disp_cols) / 2;
     let margin_top = rows.saturating_sub(disp_rows + 2) / 2;
 
-    let remaining_secs = (remaining_ms + 999) / 1000;
-    let color = if finished {
-        if flash_on { "\x1b[97m" } else { "\x1b[91m" }
-    } else if paused {
-        "\x1b[36m"
-    } else if remaining_secs <= 10 {
-        "\x1b[91m"
-    } else if remaining_secs <= 60 {
-        "\x1b[93m"
-    } else {
-        "\x1b[92m"
-    };
+    let color = pick_color(finished, flash_on, paused, remaining_ms);
 
     let mut buf = String::with_capacity(cols * rows * 6);
     buf.push_str("\x1b[H");
@@ -146,23 +214,13 @@ fn render(
                 buf.push_str("\x1b[93m");
                 buf.push_str(&msg);
                 buf.push_str("\x1b[0m");
-                for _ in msg.len()..cols {
-                    buf.push(' ');
-                }
+                for _ in msg.len()..cols { buf.push(' '); }
             } else {
-                for _ in 0..cols {
-                    buf.push(' ');
-                }
+                for _ in 0..cols { buf.push(' '); }
             }
         } else if tr == rows.saturating_sub(1) {
             buf.push_str("\x1b[0m\x1b[2m");
-            let status = if finished {
-                "TIME'S UP!  [R] reset  [Q] quit  [0-9] new time"
-            } else if paused {
-                "PAUSED  [SPACE] resume  [R] reset  [Q] quit  [0-9] new time"
-            } else {
-                "[SPACE] pause  [R] reset  [Q] quit  [0-9] new time"
-            };
+            let status = status_text(finished, paused);
             let pad_l = cols.saturating_sub(status.len()) / 2;
             for _ in 0..pad_l {
                 buf.push(' ');
